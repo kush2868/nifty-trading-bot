@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xxd \"f:/nifty-trading-bot/README.md\")",
+      "Read(//c/Users/ADMIN/.claude/projects/f--nifty-trading-bot/**)",
+      "Read(//c/Users/ADMIN/.claude/projects/**)"
+    ]
+  }
+}
