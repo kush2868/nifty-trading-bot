@@ -1,7 +1,14 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { format } from 'date-fns';
-import { api, RiskSnapshot, Trade } from './api/tradingApi';
+import {
+  Broker,
+  BROKER_URLS,
+  BROKER_LABELS,
+  createApi,
+  RiskSnapshot,
+  Trade,
+} from './api/tradingApi';
 import { PnLCard } from './components/PnLCard';
 import { PositionsTable } from './components/PositionsTable';
 import { Controls } from './components/Controls';
@@ -13,121 +20,228 @@ interface LogEntry {
   level: 'info' | 'warn' | 'error';
   msg: string;
 }
-
-interface PnLPoint { time: string; pnl: number; }
+interface PnLPoint { time: string; pnl: number }
 
 let logCounter = 0;
 
-function useLog() {
+// ── Per-broker state ─────────────────────────────────────────────────────────
+
+interface BrokerState {
+  snapshot: RiskSnapshot | null;
+  activeTrade: Trade | null;
+  niftySpot: number;
+  connected: boolean;
+  pnlHistory: PnLPoint[];
+}
+
+const defaultState = (): BrokerState => ({
+  snapshot: null,
+  activeTrade: null,
+  niftySpot: 0,
+  connected: false,
+  pnlHistory: [],
+});
+
+export default function App() {
+  const [activeBroker, setActiveBroker] = useState<Broker>('zerodha');
+
+  // Per-broker runtime state
+  const [zerodhaState, setZerodhaState] = useState<BrokerState>(defaultState);
+  const [angelState, setAngelState] = useState<BrokerState>(defaultState);
+
+  // Combined trade history (both brokers)
+  const [allTrades, setAllTrades] = useState<Trade[]>([]);
+
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const zerodhaSocket = useRef<Socket | null>(null);
+  const angelSocket = useRef<Socket | null>(null);
+
   const addLog = useCallback((level: LogEntry['level'], msg: string) => {
     setLogs((prev) => [
       { id: logCounter++, time: format(new Date(), 'HH:mm:ss'), level, msg },
       ...prev.slice(0, 199),
     ]);
   }, []);
-  return { logs, addLog };
-}
 
-export default function App() {
-  const [snapshot, setSnapshot] = useState<RiskSnapshot | null>(null);
-  const [activeTrade, setActiveTrade] = useState<Trade | null>(null);
-  const [trades, setTrades] = useState<Trade[]>([]);
-  const [pnlHistory, setPnlHistory] = useState<PnLPoint[]>([]);
-  const [niftySpot, setNiftySpot] = useState(0);
-  const [connected, setConnected] = useState(false);
-  const socketRef = useRef<Socket | null>(null);
-  const { logs, addLog } = useLog();
+  function setState(broker: Broker, patch: Partial<BrokerState>) {
+    if (broker === 'zerodha') setZerodhaState((p) => ({ ...p, ...patch }));
+    else setAngelState((p) => ({ ...p, ...patch }));
+  }
 
-  // ── Initial data load ──────────────────────────────────────────────────────
-  useEffect(() => {
-    async function load() {
-      try {
-        const [snap, active, allTrades] = await Promise.all([
-          api.getRiskSnapshot(),
-          api.getActiveTrade(),
-          api.getTrades(),
-        ]);
-        setSnapshot(snap);
-        setActiveTrade(active);
-        setTrades(allTrades);
-        addLog('info', 'Dashboard loaded successfully');
-      } catch (err) {
-        addLog('error', `Failed to load data: ${String(err)}`);
-      }
-    }
-    load();
-  }, []);
-
-  // ── WebSocket connection ───────────────────────────────────────────────────
-  useEffect(() => {
-    const socket = io('/', { transports: ['websocket'] });
-    socketRef.current = socket;
-
-    socket.on('connect', () => {
-      setConnected(true);
-      addLog('info', 'WebSocket connected — receiving live updates');
-    });
-
-    socket.on('disconnect', () => {
-      setConnected(false);
-      addLog('warn', 'WebSocket disconnected');
-    });
-
-    socket.on('update', (data: RiskSnapshot) => {
-      setSnapshot(data);
-      if (data.niftySpot) setNiftySpot(data.niftySpot);
-
-      setPnlHistory((prev) => [
-        ...prev.slice(-59),
-        { time: format(new Date(), 'HH:mm:ss'), pnl: data.currentPnL },
+  // ── Initial load for a single broker ──────────────────────────────────────
+  async function loadBroker(broker: Broker) {
+    const api = createApi(broker);
+    const label = BROKER_LABELS[broker];
+    try {
+      const [snap, active] = await Promise.all([
+        api.getRiskSnapshot(),
+        api.getActiveTrade(),
       ]);
-    });
+      setState(broker, { snapshot: snap, activeTrade: active });
+      addLog('info', `${label}: dashboard loaded`);
+    } catch {
+      addLog('warn', `${label}: backend unreachable — is the bot running?`);
+    }
+  }
 
-    return () => { socket.disconnect(); };
+  // ── Combined trade history ─────────────────────────────────────────────────
+  async function loadAllTrades() {
+    const results = await Promise.allSettled([
+      createApi('zerodha').getTrades(),
+      createApi('angel').getTrades(),
+    ]);
+
+    const combined: Trade[] = [];
+    if (results[0].status === 'fulfilled') {
+      results[0].value.forEach((t) => combined.push({ ...t, broker: 'zerodha' }));
+    }
+    if (results[1].status === 'fulfilled') {
+      results[1].value.forEach((t) => combined.push({ ...t, broker: 'angel' }));
+    }
+    // Sort newest first
+    combined.sort(
+      (a, b) => new Date(b.entryTime).getTime() - new Date(a.entryTime).getTime(),
+    );
+    setAllTrades(combined.slice(0, 100));
+  }
+
+  useEffect(() => {
+    loadBroker('zerodha');
+    loadBroker('angel');
+    loadAllTrades();
   }, []);
 
-  // ── Poll active trade ──────────────────────────────────────────────────────
+  // ── WebSocket — connect to both backends simultaneously ────────────────────
   useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const [active, allTrades] = await Promise.all([api.getActiveTrade(), api.getTrades()]);
-        setActiveTrade(active);
-        setTrades(allTrades);
-      } catch { /* silent */ }
-    }, 15_000);
+    function setupSocket(broker: Broker) {
+      const url = BROKER_URLS[broker];
+      const label = BROKER_LABELS[broker];
+      const socket = io(url, { transports: ['websocket'] });
+
+      socket.on('connect', () => {
+        setState(broker, { connected: true });
+        addLog('info', `${label}: live feed connected`);
+      });
+      socket.on('disconnect', () => {
+        setState(broker, { connected: false });
+        addLog('warn', `${label}: live feed disconnected`);
+      });
+      socket.on('update', (data: RiskSnapshot & { niftySpot?: number }) => {
+        setState(broker, {
+          snapshot: data,
+          niftySpot: data.niftySpot ?? 0,
+        });
+        if (broker === activeBroker) {
+          // Only append PnL history for the broker currently in view
+        }
+        const pnlPoint: PnLPoint = {
+          time: format(new Date(), 'HH:mm:ss'),
+          pnl: data.currentPnL,
+        };
+        if (broker === 'zerodha') {
+          setZerodhaState((p) => ({
+            ...p,
+            snapshot: data,
+            niftySpot: data.niftySpot ?? p.niftySpot,
+            pnlHistory: [...p.pnlHistory.slice(-59), pnlPoint],
+          }));
+        } else {
+          setAngelState((p) => ({
+            ...p,
+            snapshot: data,
+            niftySpot: data.niftySpot ?? p.niftySpot,
+            pnlHistory: [...p.pnlHistory.slice(-59), pnlPoint],
+          }));
+        }
+      });
+
+      return socket;
+    }
+
+    zerodhaSocket.current = setupSocket('zerodha');
+    angelSocket.current = setupSocket('angel');
+
+    return () => {
+      zerodhaSocket.current?.disconnect();
+      angelSocket.current?.disconnect();
+    };
+  }, []);
+
+  // Refresh trade history periodically
+  useEffect(() => {
+    const interval = setInterval(loadAllTrades, 30_000);
     return () => clearInterval(interval);
   }, []);
 
-  const statusColor = connected ? '#48bb78' : '#fc8181';
+  // ── Derived values for the active broker ─────────────────────────────────
+  const currentState = activeBroker === 'zerodha' ? zerodhaState : angelState;
 
   return (
     <div className="app">
       <header className="header">
-        <h1>NIFTY Calendar Spread Bot</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
+          <h1>NIFTY Calendar Spread Bot</h1>
+          {/* Broker tabs */}
+          <div className="broker-tabs">
+            {(['zerodha', 'angel'] as Broker[]).map((b) => {
+              const s = b === 'zerodha' ? zerodhaState : angelState;
+              const dotColor = s.connected ? '#48bb78' : '#fc8181';
+              return (
+                <button
+                  key={b}
+                  className={`broker-tab ${activeBroker === b ? 'active' : ''} broker-${b}`}
+                  onClick={() => setActiveBroker(b)}
+                >
+                  <span
+                    className="broker-dot"
+                    style={{ background: dotColor }}
+                  />
+                  {BROKER_LABELS[b]}
+                  {s.snapshot?.isHalted && (
+                    <span className="tab-halted">HALTED</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          {snapshot?.isHalted && (
+          {currentState.snapshot?.isHalted && (
             <span className="badge halted">TRADING HALTED</span>
           )}
           <span className="spot">
-            NIFTY: {niftySpot > 0 ? niftySpot.toFixed(2) : '—'}
+            NIFTY: {currentState.niftySpot > 0
+              ? currentState.niftySpot.toFixed(2)
+              : '—'}
           </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.75rem', color: statusColor }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', background: statusColor, display: 'inline-block' }} />
-            {connected ? 'Live' : 'Disconnected'}
+          <span className="live-dot" style={{ color: currentState.connected ? '#48bb78' : '#fc8181' }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: '50%',
+              background: currentState.connected ? '#48bb78' : '#fc8181',
+              display: 'inline-block', marginRight: 4,
+            }} />
+            {currentState.connected ? 'Live' : 'Offline'}
           </span>
         </div>
       </header>
 
       <main className="main-grid">
-        <PnLCard snapshot={snapshot} history={pnlHistory} />
+        <PnLCard
+          snapshot={currentState.snapshot}
+          history={currentState.pnlHistory}
+        />
         <Controls
-          isHalted={snapshot?.isHalted ?? false}
+          broker={activeBroker}
+          isHalted={currentState.snapshot?.isHalted ?? false}
           onAction={(msg) => addLog(msg.startsWith('✓') ? 'info' : 'error', msg)}
         />
-        <PositionsTable trade={activeTrade} niftySpot={niftySpot} />
+        <PositionsTable
+          trade={currentState.activeTrade}
+          niftySpot={currentState.niftySpot}
+        />
 
-        {/* Log viewer */}
+        {/* Activity Log */}
         <div className="card">
           <h2>Activity Log</h2>
           <div className="log-box">
@@ -147,7 +261,8 @@ export default function App() {
           </div>
         </div>
 
-        <TradeHistory trades={trades} />
+        {/* Combined trade history spans full width */}
+        <TradeHistory trades={allTrades} />
       </main>
     </div>
   );

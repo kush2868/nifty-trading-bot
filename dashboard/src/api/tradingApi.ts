@@ -1,6 +1,16 @@
 import axios from 'axios';
 
-const BASE = '';
+export type Broker = 'zerodha' | 'angel';
+
+export const BROKER_URLS: Record<Broker, string> = {
+  zerodha: 'http://localhost:3000',
+  angel: 'http://localhost:3001',
+};
+
+export const BROKER_LABELS: Record<Broker, string> = {
+  zerodha: 'Zerodha',
+  angel: 'Angel One',
+};
 
 export interface RiskSnapshot {
   isHalted: boolean;
@@ -26,6 +36,7 @@ export interface Trade {
   exitTime?: string;
   exitReason?: string;
   spreads: Spread[];
+  broker?: Broker; // injected client-side when combining histories
 }
 
 export interface Spread {
@@ -48,13 +59,35 @@ export interface Leg {
   status: string;
 }
 
-export const api = {
-  getActiveTrade: () => axios.get<Trade | null>(`${BASE}/trades/active`).then(r => r.data),
-  getTrades: () => axios.get<Trade[]>(`${BASE}/trades`).then(r => r.data),
-  getRiskSnapshot: () => axios.get<RiskSnapshot>(`${BASE}/risk/snapshot`).then(r => r.data),
-  getSpot: () => axios.get<{ nifty: number }>(`${BASE}/market/spot`).then(r => r.data),
-  closeAll: () => axios.post(`${BASE}/control/close-all`).then(r => r.data),
-  halt: () => axios.post(`${BASE}/control/halt`).then(r => r.data),
-  resume: () => axios.post(`${BASE}/control/resume`).then(r => r.data),
-  getLoginUrl: () => axios.get<{ loginUrl: string }>(`${BASE}/kite/login`).then(r => r.data),
-};
+/** Factory: returns an API client scoped to one broker's backend. */
+export function createApi(broker: Broker) {
+  const base = BROKER_URLS[broker];
+  return {
+    getActiveTrade: () =>
+      axios.get<Trade | null>(`${base}/trades/active`).then((r) => r.data),
+    getTrades: () =>
+      axios.get<Trade[]>(`${base}/trades`).then((r) => r.data),
+    getRiskSnapshot: () =>
+      axios.get<RiskSnapshot>(`${base}/risk/snapshot`).then((r) => r.data),
+    getSpot: () =>
+      axios.get<{ nifty: number }>(`${base}/market/spot`).then((r) => r.data),
+    closeAll: () =>
+      axios.post(`${base}/control/close-all`).then((r) => r.data),
+    halt: () =>
+      axios.post(`${base}/control/halt`).then((r) => r.data),
+    resume: () =>
+      axios.post(`${base}/control/resume`).then((r) => r.data),
+    // Zerodha only — get OAuth login URL
+    getKiteLoginUrl: () =>
+      axios.get<{ loginUrl: string }>(`${base}/kite/login`).then((r) => r.data),
+    // Angel One only — trigger direct login
+    angelLogin: () =>
+      axios.post(`${base}/auth/login`).then((r) => r.data),
+    getAuthStatus: () =>
+      axios.get<{ authenticated: boolean }>(`${base}/auth/status`).then((r) => r.data),
+  };
+}
+
+// Convenience singletons used by components that already know the broker
+export const zerodhaApi = createApi('zerodha');
+export const angelApi = createApi('angel');
