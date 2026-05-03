@@ -1,8 +1,7 @@
-import { logger } from '../utils/logger';
 import { atmStrike, calcBreakEvens, totalQty } from '../utils/instrumentUtils';
 import { lastTuesdayOfMonth, firstMondayAfter, daysUntilExpiry } from '../utils/dateUtils';
 import { config } from '../config';
-import { addDays, getDay, startOfDay, isBefore, isAfter } from 'date-fns';
+import { startOfDay, isBefore } from 'date-fns';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -198,7 +197,7 @@ export class BacktestEngine {
           const sp = this.cfg.optionPriceFn(spot, newStrike, newDTE, 'CE');
           const lp = this.cfg.optionPriceFn(spot, newStrike, nearDTE + 30, 'CE');
           const newBE = calcBreakEvens(newStrike, sp, lp);
-          spreads.push({ strike: newStrike, spreadType: 'CALL', entryShortPremium: sp, entryLongPremium: lp, ...newBE });
+          spreads.push({ strike: newStrike, spreadType: 'CALL', entryShortPremium: sp, entryLongPremium: lp, breakEvenUpper: newBE.upper, breakEvenLower: newBE.lower });
           capitalDeployed += Math.max(0, lp - sp) * qty;
         } else if (spot <= tightest.lower + this.cfg.adjustmentBuffer) {
           const newStrike = strike - this.cfg.strikeGap;
@@ -206,7 +205,7 @@ export class BacktestEngine {
           const sp = this.cfg.optionPriceFn(spot, newStrike, newDTE, 'PE');
           const lp = this.cfg.optionPriceFn(spot, newStrike, nearDTE + 30, 'PE');
           const newBE = calcBreakEvens(newStrike, sp, lp);
-          spreads.push({ strike: newStrike, spreadType: 'PUT', entryShortPremium: sp, entryLongPremium: lp, ...newBE });
+          spreads.push({ strike: newStrike, spreadType: 'PUT', entryShortPremium: sp, entryLongPremium: lp, breakEvenUpper: newBE.upper, breakEvenLower: newBE.lower });
           capitalDeployed += Math.max(0, lp - sp) * qty;
         }
       }

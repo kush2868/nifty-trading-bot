@@ -3,8 +3,8 @@ import axios from 'axios';
 export type Broker = 'zerodha' | 'angel';
 
 export const BROKER_URLS: Record<Broker, string> = {
-  zerodha: 'http://localhost:3000',
-  angel: 'http://localhost:3001',
+  zerodha: import.meta.env.VITE_ZERODHA_API_URL || 'http://localhost:3000',
+  angel: import.meta.env.VITE_ANGEL_API_URL || 'http://localhost:3001',
 };
 
 export const BROKER_LABELS: Record<Broker, string> = {
