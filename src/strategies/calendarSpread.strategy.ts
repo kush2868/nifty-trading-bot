@@ -5,7 +5,6 @@ import { TradeModel, ITrade, ISpread } from '../db/trade.model';
 import { marketDataService } from '../services/marketData.service';
 import { kiteService } from '../services/kite.service';
 import { orderManager } from '../execution/orderManager';
-import { riskManager } from '../risk/riskManager';
 import {
   isEntryDay,
   daysSince,
@@ -14,10 +13,11 @@ import {
 } from '../utils/dateUtils';
 import {
   atmStrike,
-  calcBreakEvens,
   totalQty,
   spreadCapitalRequired,
 } from '../utils/instrumentUtils';
+import { calcCalendarBreakevens } from '../utils/optionsPricing';
+import { spreadTransactionCost } from '../utils/transactionCost';
 import {
   StrategyState,
   AdjustmentCheck,
@@ -58,31 +58,28 @@ class CalendarSpreadStrategy {
 
   // ── Entry ──────────────────────────────────────────────────────────────────
 
-  /**
-   * Evaluate whether entry conditions are met and open the initial calendar spread.
-   *
-   * Entry rules:
-   *   1. No active trade open
-   *   2. Today is the first Monday after monthly expiry
-   *   3. Current time >= 15:20 IST
-   *   4. Sufficient margin available
-   */
   async evaluateEntry(): Promise<void> {
     if (this.isRunning) return;
-
-    const state = await this.getState();
-    if (state.activeTrade) {
-      logger.debug('Entry skipped — active trade already open');
-      return;
-    }
-
-    if (!isEntryDay()) {
-      logger.debug('Entry skipped — not the designated entry day/time');
-      return;
-    }
-
     this.isRunning = true;
+
     try {
+      const state = await this.getState();
+      if (state.activeTrade) {
+        logger.debug('Entry skipped — active trade already open');
+        return;
+      }
+
+      if (!isEntryDay()) {
+        logger.debug('Entry skipped — not the designated entry day/time');
+        return;
+      }
+
+      // Week-1 re-entry gate: if last profit exit was after 7 hold days, skip until next month
+      if (await this.wasLastProfitExitAfterWeekOne()) {
+        logger.info('Entry skipped — last profit exit was after week 1; waiting for next month');
+        return;
+      }
+
       await this.openInitialSpread();
     } finally {
       this.isRunning = false;
@@ -94,9 +91,7 @@ class CalendarSpreadStrategy {
     const strike = atmStrike(spot);
     logger.info({ spot, strike }, 'Opening initial CALL calendar spread at ATM');
 
-    // Verify margin
-    const estimatedCapital = config.strategy.capitalPerSpread;
-    const hasFunds = await kiteService.hasSufficientMargin(estimatedCapital);
+    const hasFunds = await kiteService.hasSufficientMargin(config.strategy.capitalPerSpread);
     if (!hasFunds) {
       alert.critical('Insufficient margin for initial spread — aborting entry');
       return;
@@ -122,6 +117,7 @@ class CalendarSpreadStrategy {
       currentPnL: 0,
       realizedPnL: 0,
       capitalDeployed: 0,
+      totalTransactionCosts: 0,
       status: 'OPEN',
     });
 
@@ -143,48 +139,57 @@ class CalendarSpreadStrategy {
 
   // ── Adjustment Logic ───────────────────────────────────────────────────────
 
-  /**
-   * Check whether adjustments are needed and act on them.
-   *
-   * Adjustment rules:
-   *   - If spot >= upperBE - buffer → add CALL spread at a higher strike
-   *   - If spot <= lowerBE + buffer → add PUT spread at a lower strike
-   *   - Max 3 spreads total
-   */
   async evaluateAdjustments(): Promise<void> {
-    const state = await this.getState();
-    if (!state.activeTrade) return;
+    if (this.isRunning) return;
+    this.isRunning = true;
 
-    const check = this.checkAdjustmentConditions(state);
+    try {
+      const state = await this.getState();
+      if (!state.activeTrade) return;
 
-    if (check.shouldExit) {
-      await this.executeExit(state.activeTrade, check.exitReason as ExitReason);
-      return;
-    }
+      const completedThisMonth = await this.completedTradesThisMonth();
+      const check = this.checkAdjustmentConditions(state, completedThisMonth);
 
-    if (!check.shouldAddCallSpread && !check.shouldAddPutSpread) return;
-    if (state.spreadCount >= config.strategy.maxSpreads) {
-      alert.warn('Max spreads reached — no further adjustments', { spreadCount: state.spreadCount });
-      return;
-    }
+      if (check.shouldExit) {
+        await this.executeExit(state.activeTrade, check.exitReason as ExitReason);
+        return;
+      }
 
-    const trade = state.activeTrade;
-    const spot = state.currentSpot;
+      if (!check.shouldAddCallSpread && !check.shouldAddPutSpread) return;
 
-    if (check.shouldAddCallSpread) {
-      const newStrike = atmStrike(spot) + config.strategy.strikeGap;
-      await this.addAdjustmentSpread(trade, newStrike, 'CALL', 'CE');
-    } else if (check.shouldAddPutSpread) {
-      const newStrike = atmStrike(spot) - config.strategy.strikeGap;
-      await this.addAdjustmentSpread(trade, newStrike, 'PUT', 'PE');
+      const trade = state.activeTrade;
+      const spot = state.currentSpot;
+
+      if (state.spreadCount >= config.strategy.maxSpreads) {
+        // Rule 11: at max spreads, BE still breached → close best spread, open at current ATM
+        if (check.shouldAddCallSpread) {
+          await this.closeAndReplaceSpread(trade, spot, 'CALL', 'CE');
+        } else if (check.shouldAddPutSpread) {
+          await this.closeAndReplaceSpread(trade, spot, 'PUT', 'PE');
+        }
+        return;
+      }
+
+      if (check.shouldAddCallSpread) {
+        await this.addAdjustmentSpread(trade, atmStrike(spot), 'CALL', 'CE');
+      } else if (check.shouldAddPutSpread) {
+        await this.addAdjustmentSpread(trade, atmStrike(spot), 'PUT', 'PE');
+      }
+    } finally {
+      this.isRunning = false;
     }
   }
 
-  private checkAdjustmentConditions(state: StrategyState): AdjustmentCheck {
+  private checkAdjustmentConditions(state: StrategyState, completedThisMonth: number): AdjustmentCheck {
     const { activeTrade, currentSpot, currentPnLPct, holdingDays } = state;
     if (!activeTrade) return { shouldAddCallSpread: false, shouldAddPutSpread: false, shouldExit: false };
 
-    const { profitTargetPct, maxLossPct, maxHoldDays, expiryExitDays } = config.risk;
+    const { maxHoldDays, expiryExitDays } = config.risk;
+
+    // 3rd+ trade this month: tighter TP 1.5% / SL 2%
+    const isThirdPlusTrade = completedThisMonth >= 2;
+    const profitTargetPct = isThirdPlusTrade ? 1.5 : config.risk.profitTargetPct;
+    const maxLossPct = isThirdPlusTrade ? 2.0 : config.risk.maxLossPct;
 
     // ── Exit conditions ──────────────────────────────────────────────────────
     if (currentPnLPct >= profitTargetPct) {
@@ -197,7 +202,6 @@ class CalendarSpreadStrategy {
       return { shouldAddCallSpread: false, shouldAddPutSpread: false, shouldExit: true, exitReason: 'HOLD_DAYS_EXCEEDED' };
     }
 
-    // Check near expiry of the short leg
     const firstSpread = activeTrade.spreads[0];
     if (firstSpread) {
       const daysLeft = daysUntilExpiry(firstSpread.shortLeg.expiry);
@@ -207,7 +211,7 @@ class CalendarSpreadStrategy {
     }
 
     // ── Adjustment conditions ────────────────────────────────────────────────
-    // Aggregate break-evens: use tightest range across all spreads
+    // Use tightest break-even range across all spreads
     let minUpper = Infinity;
     let maxLower = -Infinity;
 
@@ -272,12 +276,74 @@ class CalendarSpreadStrategy {
     });
   }
 
+  // Rule 11: close the spread with best PnL, open replacement at current ATM
+  private async closeAndReplaceSpread(
+    trade: ITrade,
+    spot: number,
+    spreadType: 'CALL' | 'PUT',
+    optionType: 'CE' | 'PE',
+  ): Promise<void> {
+    const currentDoc = await TradeModel.findOne({ tradeId: trade.tradeId });
+    if (!currentDoc) return;
+
+    // Find spread with highest current PnL (min loss / max profit)
+    let bestIdx = 0;
+    let bestPnL = -Infinity;
+
+    for (let i = 0; i < currentDoc.spreads.length; i++) {
+      const s = currentDoc.spreads[i];
+      const shortLive = marketDataService.getLivePrice(
+        marketDataService.getToken(s.shortLeg.symbol) ?? 0,
+      ) ?? s.shortLeg.avgFillPrice;
+      const longLive = marketDataService.getLivePrice(
+        marketDataService.getToken(s.longLeg.symbol) ?? 0,
+      ) ?? s.longLeg.avgFillPrice;
+      const pnl =
+        (s.shortLeg.avgFillPrice - shortLive) * s.shortLeg.quantity +
+        (longLive - s.longLeg.avgFillPrice) * s.longLeg.quantity;
+      if (pnl > bestPnL) { bestPnL = pnl; bestIdx = i; }
+    }
+
+    const toClose = currentDoc.spreads[bestIdx];
+    alert.info('Rule 11 — closing best spread to open at current ATM', {
+      tradeId: trade.tradeId,
+      closingStrike: toClose.strike,
+      estimatedPnL: bestPnL,
+    });
+
+    const shortLive = marketDataService.getLivePrice(
+      marketDataService.getToken(toClose.shortLeg.symbol) ?? 0,
+    ) ?? toClose.shortLeg.avgFillPrice;
+    const longLive = marketDataService.getLivePrice(
+      marketDataService.getToken(toClose.longLeg.symbol) ?? 0,
+    ) ?? toClose.longLeg.avgFillPrice;
+
+    await orderManager.closeLeg(toClose.shortLeg, shortLive);
+    await orderManager.closeLeg(toClose.longLeg, longLive);
+
+    const closingCost = spreadTransactionCost(shortLive, longLive, toClose.shortLeg.quantity);
+
+    await TradeModel.updateOne(
+      { tradeId: trade.tradeId },
+      {
+        $pull: { spreads: { spreadIndex: toClose.spreadIndex } },
+        $inc: {
+          spreadCount: -1,
+          realizedPnL: bestPnL,
+          totalTransactionCosts: closingCost,
+        },
+      },
+    );
+
+    // Open replacement at current ATM (spreadCount is now one less)
+    const refreshed = await TradeModel.findOne({ tradeId: trade.tradeId });
+    if (refreshed) {
+      await this.addAdjustmentSpread(refreshed, atmStrike(spot), spreadType, optionType);
+    }
+  }
+
   // ── Spread Execution ───────────────────────────────────────────────────────
 
-  /**
-   * Execute a single calendar spread: buy far leg first, then sell near leg.
-   * Returns the completed ISpread or null on failure.
-   */
   private async executeSpread(
     params: SpreadEntryParams,
     trade: ITrade,
@@ -295,7 +361,6 @@ class CalendarSpreadStrategy {
 
     const qty = totalQty(config.strategy.lotsPerSpread, config.strategy.lotSize);
 
-    // Get current premiums
     const premiums = await marketDataService.getOptionPremiums([nearContract.symbol, farContract.symbol]);
     const nearPremium = premiums.get(nearContract.symbol) ?? 0;
     const farPremium = premiums.get(farContract.symbol) ?? 0;
@@ -305,7 +370,7 @@ class CalendarSpreadStrategy {
       return null;
     }
 
-    // BUY far leg FIRST (reduces directional risk during placement)
+    // BUY far leg first (reduces directional risk during placement)
     const longLeg = await orderManager.placeLeg({
       symbol: farContract.symbol,
       exchange: 'NFO',
@@ -330,14 +395,27 @@ class CalendarSpreadStrategy {
       premium: nearPremium,
     });
     if (!shortLeg) {
-      // Attempt to unwind the long leg
       await orderManager.closeLeg(longLeg, farPremium);
       return null;
     }
 
+    const nearDTE = Math.max(1, daysUntilExpiry(nearExpiry));
+    const farDTE = Math.max(nearDTE + 1, daysUntilExpiry(farExpiry));
+    const spot = await marketDataService.getNiftySpot();
+
+    const be = calcCalendarBreakevens({
+      spot,
+      strike,
+      shortPremium: shortLeg.avgFillPrice,
+      longPremium: longLeg.avgFillPrice,
+      nearDTE,
+      farDTE,
+      optionType,
+    });
+
     const netPremium = shortLeg.avgFillPrice - longLeg.avgFillPrice;
-    const be = calcBreakEvens(strike, shortLeg.avgFillPrice);
     const capital = spreadCapitalRequired(shortLeg.avgFillPrice, longLeg.avgFillPrice, config.strategy.lotsPerSpread);
+    const entryCost = spreadTransactionCost(shortLeg.avgFillPrice, longLeg.avgFillPrice, qty);
 
     const spread: ISpread = {
       spreadIndex,
@@ -351,14 +429,13 @@ class CalendarSpreadStrategy {
       addedAt: new Date(),
     };
 
-    // Subscribe WebSocket for live PnL
     await marketDataService.subscribe([nearContract.token, farContract.token]);
 
     await TradeModel.updateOne(
       { tradeId: trade.tradeId },
       {
         $push: { spreads: spread },
-        $inc: { spreadCount: 1, capitalDeployed: capital },
+        $inc: { spreadCount: 1, capitalDeployed: capital, totalTransactionCosts: entryCost },
         status: 'OPEN',
       },
     );
@@ -374,39 +451,45 @@ class CalendarSpreadStrategy {
     await TradeModel.updateOne({ tradeId: trade.tradeId }, { status: 'CLOSING' });
     alert.info(`Closing trade — reason: ${reason}`, { tradeId: trade.tradeId, reason });
 
-    let realizedPnL = 0;
+    let grossPnL = 0;
+    let exitCosts = 0;
+
     const currentDoc = await TradeModel.findOne({ tradeId: trade.tradeId });
     if (!currentDoc) return;
 
     for (const spread of currentDoc.spreads) {
-      // Close short leg (BUY to close)
       const shortPremiums = await marketDataService.getOptionPremiums([spread.shortLeg.symbol]);
       const shortClose = shortPremiums.get(spread.shortLeg.symbol) ?? spread.shortLeg.avgFillPrice;
       await orderManager.closeLeg(spread.shortLeg, shortClose);
 
-      // Close long leg (SELL to close)
       const longPremiums = await marketDataService.getOptionPremiums([spread.longLeg.symbol]);
       const longClose = longPremiums.get(spread.longLeg.symbol) ?? spread.longLeg.avgFillPrice;
       await orderManager.closeLeg(spread.longLeg, longClose);
 
-      // PnL for this spread
-      const shortPnL = (spread.shortLeg.avgFillPrice - shortClose) * spread.shortLeg.quantity;
-      const longPnL = (longClose - spread.longLeg.avgFillPrice) * spread.longLeg.quantity;
-      realizedPnL += shortPnL + longPnL;
+      grossPnL +=
+        (spread.shortLeg.avgFillPrice - shortClose) * spread.shortLeg.quantity +
+        (longClose - spread.longLeg.avgFillPrice) * spread.longLeg.quantity;
+      exitCosts += spreadTransactionCost(shortClose, longClose, spread.shortLeg.quantity);
     }
+
+    // Deduct all costs (entry costs already in totalTransactionCosts + exit costs)
+    const netRealizedPnL = grossPnL - exitCosts - (currentDoc.totalTransactionCosts ?? 0);
 
     await TradeModel.updateOne(
       { tradeId: trade.tradeId },
       {
-        status: 'CLOSED',
-        exitTime: new Date(),
-        exitReason: reason,
-        realizedPnL,
-        currentPnL: realizedPnL,
+        $set: {
+          status: 'CLOSED',
+          exitTime: new Date(),
+          exitReason: reason,
+          realizedPnL: netRealizedPnL,
+          currentPnL: netRealizedPnL,
+        },
+        $inc: { totalTransactionCosts: exitCosts },
       },
     );
 
-    alert.info('Trade closed', { tradeId: trade.tradeId, realizedPnL, reason });
+    alert.info('Trade closed', { tradeId: trade.tradeId, realizedPnL: netRealizedPnL, reason });
   }
 
   // ── Manual Override ────────────────────────────────────────────────────────
@@ -436,13 +519,36 @@ class CalendarSpreadStrategy {
           marketDataService.getToken(spread.longLeg.symbol) ?? 0,
         ) ?? spread.longLeg.avgFillPrice;
 
-        const shortPnL = (spread.shortLeg.avgFillPrice - shortLivePrice) * spread.shortLeg.quantity;
-        const longPnL = (longLivePrice - spread.longLeg.avgFillPrice) * spread.longLeg.quantity;
-        unrealizedPnL += shortPnL + longPnL;
+        unrealizedPnL +=
+          (spread.shortLeg.avgFillPrice - shortLivePrice) * spread.shortLeg.quantity +
+          (longLivePrice - spread.longLeg.avgFillPrice) * spread.longLeg.quantity;
       }
 
       await TradeModel.updateOne({ tradeId: trade.tradeId }, { currentPnL: unrealizedPnL });
     }
+  }
+
+  // ── Helper Queries ─────────────────────────────────────────────────────────
+
+  private async wasLastProfitExitAfterWeekOne(): Promise<boolean> {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const lastProfitExit = await TradeModel.findOne(
+      { status: 'CLOSED', exitReason: 'PROFIT_TARGET', exitTime: { $gte: monthStart } },
+      null,
+      { sort: { exitTime: -1 } },
+    ).lean() as ITrade | null;
+    if (!lastProfitExit) return false;
+    const holdDays = Math.round(
+      (new Date(lastProfitExit.exitTime!).getTime() - new Date(lastProfitExit.entryTime).getTime()) / 86400000,
+    );
+    return holdDays > 7;
+  }
+
+  private async completedTradesThisMonth(): Promise<number> {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    return TradeModel.countDocuments({ status: 'CLOSED', exitTime: { $gte: monthStart } });
   }
 }
 

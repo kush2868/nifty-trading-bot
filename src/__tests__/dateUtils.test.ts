@@ -1,37 +1,37 @@
 import {
-  lastThursdayOfMonth,
+  lastTuesdayOfMonth,
   firstMondayAfter,
   daysUntilExpiry,
   daysSince,
   formatKiteExpiry,
 } from '../utils/dateUtils';
 
-describe('lastThursdayOfMonth', () => {
-  it('finds last Thursday correctly for known months', () => {
-    // June 2024: last Thursday = June 27
-    const jun2024 = lastThursdayOfMonth(2024, 5); // month is 0-indexed
-    expect(jun2024.getDate()).toBe(27);
+describe('lastTuesdayOfMonth', () => {
+  it('finds last Tuesday correctly for known months', () => {
+    // June 2024: last Tuesday = June 25
+    const jun2024 = lastTuesdayOfMonth(2024, 5); // month is 0-indexed
+    expect(jun2024.getDate()).toBe(25);
     expect(jun2024.getMonth()).toBe(5);
-    expect(jun2024.getDay()).toBe(4); // 4 = Thursday
+    expect(jun2024.getDay()).toBe(2); // 2 = Tuesday
 
-    // July 2024: last Thursday = July 25
-    const jul2024 = lastThursdayOfMonth(2024, 6);
-    expect(jul2024.getDate()).toBe(25);
-    expect(jul2024.getDay()).toBe(4);
+    // July 2024: last Tuesday = July 30
+    const jul2024 = lastTuesdayOfMonth(2024, 6);
+    expect(jul2024.getDate()).toBe(30);
+    expect(jul2024.getDay()).toBe(2);
   });
 
-  it('always returns a Thursday', () => {
+  it('always returns a Tuesday', () => {
     for (let month = 0; month < 12; month++) {
-      const d = lastThursdayOfMonth(2024, month);
-      expect(d.getDay()).toBe(4);
+      const d = lastTuesdayOfMonth(2024, month);
+      expect(d.getDay()).toBe(2);
     }
   });
 });
 
 describe('firstMondayAfter', () => {
   it('returns the Monday immediately after given date', () => {
-    // June 27, 2024 (Thursday) → next Monday = July 1, 2024
-    const thursday = new Date(2024, 5, 27);
+    // June 25, 2024 (Tuesday) → next Monday = July 1, 2024
+    const thursday = new Date(2024, 5, 25);
     const monday = firstMondayAfter(thursday);
     expect(monday.getDay()).toBe(1);
     expect(monday.getDate()).toBe(1);

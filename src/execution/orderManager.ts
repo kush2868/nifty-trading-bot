@@ -31,7 +31,9 @@ class OrderManager {
    * Returns the populated ILeg or null if all retries failed.
    */
   async placeLeg(params: LegPlacementParams): Promise<ILeg | null> {
-    const { symbol, exchange, transactionType, optionType, strike, expiry, quantity, premium } = params;
+    if (config.trading.mode === 'paper') return this.simulateLeg(params);
+
+    const { symbol, exchange, transactionType, expiry, quantity, premium } = params;
 
     const limitPrice = this.computeLimitPrice(transactionType, premium);
     logger.info({ symbol, transactionType, quantity, limitPrice }, 'Placing leg order');
@@ -67,7 +69,7 @@ class OrderManager {
     this.placedOrderIds.add(orderId);
 
     // Wait for the order to fill (polling with timeout)
-    const filled = await this.waitForFill(orderId, symbol, limitPrice, premium);
+    const filled = await this.waitForFill(orderId, symbol, limitPrice, expiry);
     return filled;
   }
 
@@ -75,6 +77,20 @@ class OrderManager {
    * Close an existing leg by placing the opposite order.
    */
   async closeLeg(leg: ILeg, currentPremium: number): Promise<ILeg | null> {
+    if (config.trading.mode === 'paper') {
+      const closeType: 'BUY' | 'SELL' = leg.transactionType === 'SELL' ? 'BUY' : 'SELL';
+      return this.simulateLeg({
+        symbol: leg.symbol,
+        exchange: leg.exchange,
+        transactionType: closeType,
+        optionType: leg.optionType,
+        strike: leg.strike,
+        expiry: leg.expiry,
+        quantity: leg.quantity,
+        premium: currentPremium,
+      });
+    }
+
     const closeTransactionType: 'BUY' | 'SELL' = leg.transactionType === 'SELL' ? 'BUY' : 'SELL';
     const limitPrice = this.computeLimitPrice(closeTransactionType, currentPremium);
 
@@ -105,7 +121,7 @@ class OrderManager {
       return null;
     }
 
-    return this.waitForFill(orderId, leg.symbol, limitPrice, currentPremium);
+    return this.waitForFill(orderId, leg.symbol, limitPrice, leg.expiry);
   }
 
   // ── Order Fill Monitoring ──────────────────────────────────────────────────
@@ -118,7 +134,7 @@ class OrderManager {
     orderId: string,
     symbol: string,
     limitPrice: number,
-    fallbackPremium: number,
+    expiry: Date,
   ): Promise<ILeg | null> {
     const deadline = Date.now() + FILL_TIMEOUT_MS;
 
@@ -139,7 +155,7 @@ class OrderManager {
 
       if (order.status === 'COMPLETE') {
         logger.info({ orderId, avgPrice: order.average_price }, 'Order filled completely');
-        return this.buildLeg(order, symbol, limitPrice);
+        return this.buildLeg(order, symbol, limitPrice, expiry);
       }
 
       if (order.status === 'REJECTED') {
@@ -193,7 +209,7 @@ class OrderManager {
     quantity: number;
     average_price: number;
     placed_at: string;
-  }, symbol: string, limitPrice: number): ILeg {
+  }, symbol: string, limitPrice: number, expiry: Date): ILeg {
     return {
       kiteOrderId: order.order_id,
       symbol,
@@ -201,12 +217,35 @@ class OrderManager {
       transactionType: order.transaction_type as 'BUY' | 'SELL',
       optionType: symbol.endsWith('CE') ? 'CE' : 'PE',
       strike: this.extractStrike(symbol),
-      expiry: new Date(), // will be overwritten by caller if needed
+      expiry,
       quantity: order.quantity,
       limitPrice,
       avgFillPrice: order.average_price,
       status: 'FILLED' as LegStatus,
       placedAt: new Date(order.placed_at),
+      filledAt: new Date(),
+    };
+  }
+
+  private simulateLeg(params: LegPlacementParams): ILeg {
+    const limitPrice = this.computeLimitPrice(params.transactionType, params.premium);
+    logger.info(
+      { symbol: params.symbol, transactionType: params.transactionType, quantity: params.quantity, limitPrice },
+      'Paper mode — simulated fill',
+    );
+    return {
+      kiteOrderId: `PAPER_${Date.now()}`,
+      symbol: params.symbol,
+      exchange: params.exchange,
+      transactionType: params.transactionType,
+      optionType: params.optionType,
+      strike: params.strike,
+      expiry: params.expiry,
+      quantity: params.quantity,
+      limitPrice,
+      avgFillPrice: limitPrice,
+      status: 'FILLED' as LegStatus,
+      placedAt: new Date(),
       filledAt: new Date(),
     };
   }

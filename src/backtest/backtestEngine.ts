@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger';
 import { atmStrike, calcBreakEvens, totalQty } from '../utils/instrumentUtils';
-import { lastThursdayOfMonth, firstMondayAfter, daysUntilExpiry } from '../utils/dateUtils';
+import { lastTuesdayOfMonth, firstMondayAfter, daysUntilExpiry } from '../utils/dateUtils';
 import { config } from '../config';
 import { addDays, getDay, startOfDay, isBefore, isAfter } from 'date-fns';
 
@@ -158,10 +158,10 @@ export class BacktestEngine {
     // Compute expiries from bar date
     const year = entryBar.date.getFullYear();
     const month = entryBar.date.getMonth();
-    const nearExpiry = lastThursdayOfMonth(year, month);
+    const nearExpiry = lastTuesdayOfMonth(year, month);
     const farExpiry = month < 11
-      ? lastThursdayOfMonth(year, month + 1)
-      : lastThursdayOfMonth(year + 1, 0);
+      ? lastTuesdayOfMonth(year, month + 1)
+      : lastTuesdayOfMonth(year + 1, 0);
 
     const nearDTE = Math.max(1, Math.round((nearExpiry.getTime() - entryBar.date.getTime()) / 86400000));
     const farDTE = Math.max(1, Math.round((farExpiry.getTime() - entryBar.date.getTime()) / 86400000));
@@ -171,7 +171,7 @@ export class BacktestEngine {
 
     if (shortPremium <= 0 || longPremium <= 0) return null;
 
-    const be = calcBreakEvens(strike, shortPremium);
+    const be = calcBreakEvens(strike, shortPremium, longPremium);
     const spreads: BacktestSpread[] = [{
       strike,
       spreadType: 'CALL',
@@ -197,7 +197,7 @@ export class BacktestEngine {
           const newDTE = Math.max(1, Math.round((nearExpiry.getTime() - bar.date.getTime()) / 86400000));
           const sp = this.cfg.optionPriceFn(spot, newStrike, newDTE, 'CE');
           const lp = this.cfg.optionPriceFn(spot, newStrike, nearDTE + 30, 'CE');
-          const newBE = calcBreakEvens(newStrike, sp);
+          const newBE = calcBreakEvens(newStrike, sp, lp);
           spreads.push({ strike: newStrike, spreadType: 'CALL', entryShortPremium: sp, entryLongPremium: lp, ...newBE });
           capitalDeployed += Math.max(0, lp - sp) * qty;
         } else if (spot <= tightest.lower + this.cfg.adjustmentBuffer) {
@@ -205,7 +205,7 @@ export class BacktestEngine {
           const newDTE = Math.max(1, Math.round((nearExpiry.getTime() - bar.date.getTime()) / 86400000));
           const sp = this.cfg.optionPriceFn(spot, newStrike, newDTE, 'PE');
           const lp = this.cfg.optionPriceFn(spot, newStrike, nearDTE + 30, 'PE');
-          const newBE = calcBreakEvens(newStrike, sp);
+          const newBE = calcBreakEvens(newStrike, sp, lp);
           spreads.push({ strike: newStrike, spreadType: 'PUT', entryShortPremium: sp, entryLongPremium: lp, ...newBE });
           capitalDeployed += Math.max(0, lp - sp) * qty;
         }
@@ -283,7 +283,7 @@ export class BacktestEngine {
     const d = bar.date;
     const year = d.getFullYear();
     const month = d.getMonth();
-    const expiry = lastThursdayOfMonth(year, month);
+    const expiry = lastTuesdayOfMonth(year, month);
     const entryDay = firstMondayAfter(expiry);
     return startOfDay(d).getTime() === startOfDay(entryDay).getTime();
   }

@@ -41,15 +41,19 @@ export const config = {
     lotsPerSpread: optionalEnvNum('LOTS_PER_SPREAD', 1),
     maxSpreads: optionalEnvNum('MAX_SPREADS', 3),
     capitalPerSpread: optionalEnvNum('CAPITAL_PER_SPREAD', 40000),
-    strikeGap: optionalEnvNum('STRIKE_GAP', 50),
+    strikeGap: optionalEnvNum('STRIKE_GAP', 100),       // far-month liquidity exists only at 100-pt strikes
     adjustmentBuffer: optionalEnvNum('ADJUSTMENT_BUFFER', 50),
   },
 
   risk: {
-    profitTargetPct: optionalEnvNum('PROFIT_TARGET_PCT', 10),
-    maxLossPct: optionalEnvNum('MAX_LOSS_PCT', 15),
-    maxHoldDays: optionalEnvNum('MAX_HOLD_DAYS', 5),
+    profitTargetPct: optionalEnvNum('PROFIT_TARGET_PCT', 2.5),
+    maxLossPct: optionalEnvNum('MAX_LOSS_PCT', 4),
+    maxHoldDays: optionalEnvNum('MAX_HOLD_DAYS', 30),   // safety backstop; normal exit is via TP/SL/expiry
     expiryExitDays: optionalEnvNum('EXPIRY_EXIT_DAYS', 3),
+  },
+
+  trading: {
+    mode: optionalEnv('TRADING_MODE', 'paper') as 'paper' | 'live',
   },
 
   execution: {

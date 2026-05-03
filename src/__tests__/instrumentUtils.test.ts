@@ -42,14 +42,14 @@ describe('parseOptionSymbol', () => {
 });
 
 describe('calcBreakEvens', () => {
-  it('computes break-even levels symmetrically around strike', () => {
-    const { upper, lower } = calcBreakEvens(22500, 150);
-    expect(upper).toBe(22650);
-    expect(lower).toBe(22350);
+  it('computes asymmetric break-evens: upper = strike + longPremium, lower = strike - shortPremium', () => {
+    const { upper, lower } = calcBreakEvens(22500, 150, 200);
+    expect(upper).toBe(22700); // 22500 + 200 (far leg)
+    expect(lower).toBe(22350); // 22500 - 150 (near leg)
   });
 
-  it('handles zero premium', () => {
-    const { upper, lower } = calcBreakEvens(22500, 0);
+  it('handles zero premiums', () => {
+    const { upper, lower } = calcBreakEvens(22500, 0, 0);
     expect(upper).toBe(22500);
     expect(lower).toBe(22500);
   });

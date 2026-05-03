@@ -1,5 +1,5 @@
 import { BacktestEngine, defaultOptionPriceFn, blackScholesApprox } from '../backtest/backtestEngine';
-import { lastThursdayOfMonth, firstMondayAfter } from '../utils/dateUtils';
+import { lastTuesdayOfMonth, firstMondayAfter } from '../utils/dateUtils';
 import { addDays } from 'date-fns';
 
 // ── Black-Scholes Sanity Checks ───────────────────────────────────────────────
@@ -36,10 +36,10 @@ function makeEntryBar(date: Date, close: number) {
 
 /**
  * Build a minimal bar series that has exactly one valid entry day
- * (first Monday after last Thursday of the given month).
+ * (first Monday after last Tuesday of the given month).
  */
 function buildTestBars(year: number, month: number, spotBase: number) {
-  const expiry = lastThursdayOfMonth(year, month);
+  const expiry = lastTuesdayOfMonth(year, month);
   const entryDay = firstMondayAfter(expiry);
 
   const bars = [];

@@ -21,7 +21,7 @@ import { marketDataService } from './services/marketData.service';
 import { calendarSpreadStrategy } from './strategies/calendarSpread.strategy';
 import { riskManager } from './risk/riskManager';
 import { buildServer } from './api/server';
-import { sleep } from './utils/retry';
+import { isMarketOpen } from './utils/dateUtils';
 
 // ── Intervals ─────────────────────────────────────────────────────────────────
 
@@ -84,10 +84,14 @@ async function boot(): Promise<void> {
 // ── Trading Loops ──────────────────────────────────────────────────────────────
 
 async function startTradingLoops(): Promise<void> {
+  // Start WebSocket ticker (subscribes NIFTY spot automatically)
+  await marketDataService.startTicker([]);
+
   // PnL updates (highest frequency)
   timers.push(
     setInterval(async () => {
       try {
+        if (!isMarketOpen()) return;
         const halted = await riskManager.isTradingHalted();
         if (halted) return;
         await calendarSpreadStrategy.updateLivePnL();
@@ -102,6 +106,7 @@ async function startTradingLoops(): Promise<void> {
   timers.push(
     setInterval(async () => {
       try {
+        if (!isMarketOpen()) return;
         const halted = await riskManager.isTradingHalted();
         if (halted) {
           logger.debug('Trading halted — skipping adjustment check');
@@ -118,6 +123,7 @@ async function startTradingLoops(): Promise<void> {
   timers.push(
     setInterval(async () => {
       try {
+        if (!isMarketOpen()) return;
         const halted = await riskManager.isTradingHalted();
         if (halted) return;
         await calendarSpreadStrategy.evaluateEntry();
@@ -152,14 +158,15 @@ async function shutdown(signal: string): Promise<void> {
   process.exit(0);
 }
 
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
   alert.critical('Uncaught exception — bot stopping', { error: err.message, stack: err.stack });
-  shutdown('uncaughtException');
+  void shutdown('uncaughtException');
 });
 process.on('unhandledRejection', (reason) => {
   alert.critical('Unhandled promise rejection', { reason: String(reason) });
+  void shutdown('unhandledRejection');
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────────

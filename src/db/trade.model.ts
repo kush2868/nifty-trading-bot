@@ -86,6 +86,7 @@ export interface ITrade extends Document {
   currentPnL: number;
   realizedPnL: number;
   capitalDeployed: number;
+  totalTransactionCosts: number;
   status: TradeStatus;
   exitTime?: Date;
   exitReason?: string;
@@ -104,6 +105,7 @@ const TradeSchema = new Schema<ITrade>(
     currentPnL: { type: Number, default: 0 },
     realizedPnL: { type: Number, default: 0 },
     capitalDeployed: { type: Number, default: 0 },
+    totalTransactionCosts: { type: Number, default: 0 },
     status: { type: String, enum: ['OPEN', 'CLOSED', 'ADJUSTING', 'CLOSING'], default: 'OPEN' },
     exitTime: { type: Date },
     exitReason: { type: String },

@@ -26,15 +26,15 @@ export function todayAtIST(hours: number, minutes: number, seconds = 0): Date {
 }
 
 /**
- * Find the last Thursday of a given month/year.
- * Kite typically uses last Thursday as monthly expiry.
+ * Find the last Tuesday of a given month/year.
+ * NIFTY monthly options expire on the last Tuesday of the month.
  */
-export function lastThursdayOfMonth(year: number, month: number): Date {
+export function lastTuesdayOfMonth(year: number, month: number): Date {
   // month is 0-indexed (JS Date convention)
   const lastDay = lastDayOfMonth(new Date(year, month, 1));
   let d = lastDay;
-  while (getDay(d) !== 4) {
-    // 4 = Thursday
+  while (getDay(d) !== 2) {
+    // 2 = Tuesday
     d = addDays(d, -1);
   }
   return d;
@@ -53,21 +53,50 @@ export function firstMondayAfter(date: Date): Date {
 }
 
 /**
- * Return true if today (IST) is the first Monday after this month's expiry
+ * Return true if the current time is within NSE market hours (Mon–Fri, 9:15–15:30 IST).
+ */
+export function isMarketOpen(): boolean {
+  const ist = nowIST();
+  const day = getDay(ist);
+  if (day === 0 || day === 6) return false; // Sunday or Saturday
+  const open = todayAtIST(9, 15);
+  const close = todayAtIST(15, 30);
+  const now = new Date();
+  return !isBefore(now, open) && isBefore(now, close);
+}
+
+/**
+ * Return true if today (IST) falls within the monthly entry window
  * AND current time is after 15:20 IST.
+ *
+ * Entry window:
+ *   Start — first Monday after previous month's expiry
+ *   End   — 7 days before current month's expiry (inclusive)
  */
 export function isEntryDay(): boolean {
   const ist = nowIST();
   const year = ist.getFullYear();
   const month = ist.getMonth();
 
-  const expiry = lastThursdayOfMonth(year, month);
-  const entryDay = firstMondayAfter(expiry);
+  // Window start: first Monday after previous month's expiry
+  const prevMonth = month === 0 ? 11 : month - 1;
+  const prevYear = month === 0 ? year - 1 : year;
+  const prevExpiry = lastTuesdayOfMonth(prevYear, prevMonth);
+  const windowStart = firstMondayAfter(prevExpiry);
+
+  // Window end: 7 days before current month's expiry (inclusive)
+  const currentExpiry = lastTuesdayOfMonth(year, month);
+  const windowEnd = addDays(currentExpiry, -7);
 
   const todayIST = startOfDay(ist);
-  const entryDayIST = startOfDay(toIST(entryDay));
+  const windowStartIST = startOfDay(toIST(windowStart));
+  const windowEndIST = startOfDay(toIST(windowEnd));
 
-  if (todayIST.getTime() !== entryDayIST.getTime()) return false;
+  const inWindow =
+    !isBefore(todayIST, windowStartIST) &&
+    !isBefore(windowEndIST, todayIST);
+
+  if (!inWindow) return false;
 
   const entryTime = todayAtIST(15, 20);
   return !isBefore(new Date(), entryTime);
@@ -104,7 +133,7 @@ export function upcomingExpiries(count: number): Date[] {
   let month = ist.getMonth();
 
   while (expiries.length < count) {
-    const exp = lastThursdayOfMonth(year, month);
+    const exp = lastTuesdayOfMonth(year, month);
     if (!isBefore(exp, startOfDay(ist))) {
       expiries.push(exp);
     }

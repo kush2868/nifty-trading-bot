@@ -75,16 +75,19 @@ export function spreadCapitalRequired(
 /**
  * Calculate upper and lower break-even levels for a calendar spread.
  *
- * For a long calendar spread (buy far, sell near) centered at ATM:
- *   - The short premium defines how far the spot can move before loss.
- *   - Simplified: BE levels = strike ± short_leg_premium
+ * Asymmetric approximation matching observed broker pricing:
+ *   Upper BE = strike + far_leg_premium  (CE calendar has more upside room
+ *              because the far leg gains intrinsic + time value as spot rises)
+ *   Lower BE = strike - near_leg_premium (downside is tighter — both legs
+ *              decay toward zero when spot falls away from strike)
  */
 export function calcBreakEvens(
   atmStrikePrice: number,
   shortLegPremium: number,
+  longLegPremium: number,
 ): { upper: number; lower: number } {
   return {
-    upper: atmStrikePrice + shortLegPremium,
+    upper: atmStrikePrice + longLegPremium,
     lower: atmStrikePrice - shortLegPremium,
   };
 }
